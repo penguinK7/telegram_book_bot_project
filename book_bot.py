@@ -1,7 +1,6 @@
-import logging
 import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+import logging
+from telebot import TeleBot, types
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env файла
@@ -10,6 +9,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 CHAT_ID = os.getenv("CHAT_ID")
 
+# Инициализация бота
+bot = TeleBot(TELEGRAM_TOKEN)
+
 # Включаем логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -17,71 +19,89 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 books = []
 votes = {}
 
+# Переменная для отслеживания состояния
+awaiting_book = False  # Флаг для отслеживания, ожидаем ли мы ввод книги
+
 # Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Привет! Используйте /new_book для добавления книги.')
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, 'Привет! Используйте /new_book для добавления книги.')
 
 # Команда /new_book
-async def new_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Введите название и автора книги в формате "Название - Автор".')
+@bot.message_handler(commands=['new_book'])
+def new_book(message):
+    global awaiting_book
+    awaiting_book = True  # Устанавливаем флаг, что ожидаем ввод книги
+    bot.reply_to(message, 'Введите название и автора книги в формате "Название - Автор".')
 
 # Обработка текстовых сообщений (книг)
-async def receive_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    book_info = update.message.text
+@bot.message_handler(func=lambda message: awaiting_book)
+def receive_book(message):
+    global awaiting_book
+    book_info = message.text
     books.append(book_info)  # Сохраняем книгу
-    await update.message.reply_text(f'Книга "{book_info}" добавлена. Теперь вы можете ввести /new_book для добавления еще одной книги. Или /vote для голосования.')
+    awaiting_book = False  # Сбрасываем флаг
+    bot.reply_to(message, f'Книга "{book_info}" добавлена. Теперь вы можете ввести /new_book для добавления еще одной книги.')
 
 # Команда /vote
-async def vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['vote'])
+def vote(message):
     if not books:
-        await update.message.reply_text('Книги еще не добавлены. Пожалуйста, используйте /new_book для добавления книги.')
+        bot.reply_to(message, 'Книги еще не добавлены. Пожалуйста, используйте /new_book для добавления книги.')
         return
 
     # Создаем кнопки для голосования
-    keyboard = [[InlineKeyboardButton(book, callback_data=book) for book in books]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = types.InlineKeyboardMarkup()
+    for idx, book in enumerate(books, start=1):
+        keyboard.add(types.InlineKeyboardButton(text=book, callback_data=f'vote_{idx}'))
 
-    await update.message.reply_text('Проголосуйте за книгу:', reply_markup=reply_markup)
+    bot.send_message(CHAT_ID, 'Проголосуйте за книгу:', reply_markup=keyboard)
 
 # Обработка голосов
-async def handle_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()  # Подтверждаем нажатие кнопки
+@bot.callback_query_handler(func=lambda call: call.data.startswith('vote_'))
+def handle_vote(call):
+    vote_number = int(call.data.split('_')[1]) - 1
+    if 0 <= vote_number < len(books):
+        if books[vote_number] in votes:
+            votes[books[vote_number]] += 1
+        else:
+            votes[books[vote_number]] = 1
 
-    book_title = query.data
-    if book_title in votes:
-        votes[book_title] += 1
+        # Закрываем голосование для пользователя
+        bot.answer_callback_query(call.id, f'Ваш голос за "{books[vote_number]}" принят!')
+        bot.edit_message_text(text=f'Ваш голос за "{books[vote_number]}" принят!', chat_id=call.message.chat.id, message_id=call.message.message_id)
     else:
-        votes[book_title] = 1
-
-    await query.edit_message_text(text=f'Ваш голос за "{book_title}" принят!')
+        bot.answer_callback_query(call.id, 'Пожалуйста, введите корректный номер книги.')
 
 # Команда /result
-async def result(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['result'])
+def result(message):
     if not votes:
-        await update.message.reply_text('Голосование еще не проводилось.')
+        bot.reply_to(message, 'Голосование еще не проводилось.')
         return
 
-    # Подсчитываем результаты
     max_votes = max(votes.values())
     winners = [book for book, count in votes.items() if count == max_votes]
 
     if len(winners) == 1:
-        await update.message.reply_text(f'Победила книга: "{winners[0]}" с {max_votes} голосом(ами).')
+        bot.reply_to(message, f'Победила книга: "{winners[0]}" с {max_votes} голосом(ами).')
     else:
-        await update.message.reply_text(f'Победили книги: {", ".join(winners)} с {max_votes} голосом(ами).')
+        bot.reply_to(message, f'Победили книги: {", ".join(winners)} с {max_votes} голосом(ами).')
 
-# Основная функция
+# Команда /clear
+@bot.message_handler(commands=['clear'])
+def clear_books(message):
+    global books, votes
+    books.clear()
+    votes.clear()
+    bot.reply_to(message, 'Список книг и результаты голосования очищены.')
+
+# Игнорируем все текстовые сообщения, кроме тех, которые идут после /new_book
+@bot.message_handler(func=lambda message: True)
+def ignore_messages(message):
+    # Ничего не делаем, просто игнорируем
+    pass
+
+# Запуск бота
 if __name__ == '__main__':
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    # Обработчики команд и сообщений
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("new_book", new_book))
-    application.add_handler(CommandHandler("vote", vote))
-    application.add_handler(CommandHandler("result", result))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_book))
-    application.add_handler(CallbackQueryHandler(handle_vote))  # Обработка нажатий на кнопки
-
-    # Запускаем бота
-    application.run_polling()
+    bot.polling(none_stop=True)
